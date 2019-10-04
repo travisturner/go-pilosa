@@ -34,6 +34,7 @@ package pilosa
 
 import (
 	"bytes"
+	"context"
 	"crypto/tls"
 	"encoding/json"
 	"fmt"
@@ -54,9 +55,11 @@ import (
 	"github.com/opentracing/opentracing-go"
 	pbuf "github.com/pilosa/go-pilosa/gopilosa_pbuf"
 	"github.com/pilosa/go-pilosa/lru"
+	ppb "github.com/pilosa/pilosa/proto"
 	"github.com/pilosa/pilosa/roaring"
 	"github.com/pkg/errors"
 	"golang.org/x/sync/errgroup"
+	"google.golang.org/grpc"
 )
 
 // PQLVersion is the version of PQL expected by the client
@@ -89,6 +92,9 @@ type Client struct {
 
 	importLogEncoder encoder
 	logLock          sync.Mutex
+
+	// gRPC connection
+	grpcConn *grpc.ClientConn
 }
 
 // DefaultClient creates a client with the default address and options.
@@ -151,8 +157,29 @@ func newClientWithOptions(options *ClientOptions) *Client {
 	c.minRetrySleepTime = 1 * time.Second
 	c.maxRetrySleepTime = 2 * time.Minute
 	c.importManager = newRecordImportManager(c)
+
+	// Set up gRPC if a dial target has been provided.
+	if options.grpcDialTarget != "" {
+		var opts []grpc.DialOption
+		opts = append(opts, grpc.WithInsecure()) // TODO: consider implementing WithTransportCredentials()
+		conn, err := grpc.Dial(options.grpcDialTarget, opts...)
+		if err != nil {
+			log.Fatalf("failed to dial grpc target: %v", err)
+			return nil
+		}
+		c.grpcConn = conn
+	}
+
 	return c
 
+}
+
+// Close closes any connections the client has opened.
+func (c *Client) Close() error {
+	if c.grpcConn != nil {
+		return c.grpcConn.Close()
+	}
+	return nil
 }
 
 // NewClient creates a client with the given address, URI, or cluster and options.
@@ -239,6 +266,47 @@ func (c *Client) Query(query PQLQuery, options ...interface{}) (*QueryResponse, 
 		return nil, err
 	}
 	return queryResponse, nil
+}
+
+func (c *Client) GrpcQuery(ctx context.Context, index string, pql string) (ppb.Pilosa_QueryPQLClient, error) {
+	if c.grpcConn == nil {
+		return nil, errors.New("client has not established a grpc connection")
+	}
+
+	grpcClient := ppb.NewPilosaClient(c.grpcConn)
+
+	stream, err := grpcClient.QueryPQL(ctx, &ppb.QueryPQLRequest{
+		Index: index,
+		Pql:   pql,
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "getting stream")
+	} else if stream == nil {
+		return nil, errors.New("could not create stream")
+	}
+
+	return stream, err
+}
+
+func (c *Client) GrpcInspect(ctx context.Context, index string, columns *ppb.IdsOrKeys, filters []string) (ppb.Pilosa_InspectClient, error) {
+	if c.grpcConn == nil {
+		return nil, errors.New("client has not established a grpc connection")
+	}
+
+	grpcClient := ppb.NewPilosaClient(c.grpcConn)
+
+	stream, err := grpcClient.Inspect(ctx, &ppb.InspectRequest{
+		Index:        index,
+		Columns:      columns,
+		FilterFields: filters,
+	})
+	if err != nil {
+		return nil, errors.Wrap(err, "getting stream")
+	} else if stream == nil {
+		return nil, errors.New("could not create stream")
+	}
+
+	return stream, err
 }
 
 // CreateIndex creates an index on the server using the given Index struct.
@@ -1376,6 +1444,7 @@ type ClientOptions struct {
 	manualServerAddress bool
 	tracer              opentracing.Tracer
 	retries             *int
+	grpcDialTarget      string
 
 	importLogWriter io.Writer
 }
@@ -1467,6 +1536,14 @@ func OptClientRetries(retries int) ClientOption {
 			return errors.New("retries must be non-negative")
 		}
 		options.retries = &retries
+		return nil
+	}
+}
+
+// OptGRPCDialTarget sets the gRPC dial target.
+func OptGRPCDialTarget(target string) ClientOption {
+	return func(options *ClientOptions) error {
+		options.grpcDialTarget = target
 		return nil
 	}
 }

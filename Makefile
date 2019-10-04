@@ -22,6 +22,12 @@ generate:
 	sed -i -e 's/package internal;/package gopilosa_pbuf;/g' gopilosa_pbuf/public.proto
 	protoc --go_out=. gopilosa_pbuf/public.proto
 
+PROTO_OUT="--go_out=plugins=grpc:."
+
+# run protoc inside docker
+proto:
+	docker run --rm -v $(PWD):/go-pilosa -w /go-pilosa thethingsindustries/protoc -I/usr/include -I. $(PROTO_OUT) gopilosa_pbuf/*.proto
+
 test:
 	PILOSA_BIND=$(PILOSA_BIND) go test ./... -tags=nointegration $(TESTFLAGS)
 
