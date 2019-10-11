@@ -268,7 +268,7 @@ func (c *Client) Query(query PQLQuery, options ...interface{}) (*QueryResponse, 
 	return queryResponse, nil
 }
 
-func (c *Client) GrpcQuery(ctx context.Context, index string, pql string) (ppb.Pilosa_QueryPQLClient, error) {
+func (c *Client) GrpcQuery(ctx context.Context, index string, pql string) (grpc.ClientStream, error) {
 	if c.grpcConn == nil {
 		return nil, errors.New("client has not established a grpc connection")
 	}
@@ -288,17 +288,29 @@ func (c *Client) GrpcQuery(ctx context.Context, index string, pql string) (ppb.P
 	return stream, err
 }
 
-func (c *Client) GrpcInspect(ctx context.Context, index string, columns *ppb.IdsOrKeys, filters []string) (ppb.Pilosa_InspectClient, error) {
+func (c *Client) GrpcInspect(ctx context.Context, index string, columnIDs []uint64, columnKeys []string, fieldFilters []string) (grpc.ClientStream, error) {
 	if c.grpcConn == nil {
 		return nil, errors.New("client has not established a grpc connection")
+	}
+
+	if len(columnIDs) > 0 && len(columnKeys) > 0 {
+		return nil, errors.New("only provide column ids or keys, not both")
+	}
+
+	// Convert columns to proto type IdsOrKeys.
+	idsOrKeys := &ppb.IdsOrKeys{}
+	if len(columnKeys) > 0 {
+		idsOrKeys.Type = &ppb.IdsOrKeys_Keys{Keys: &ppb.Keys{Vals: columnKeys}}
+	} else {
+		idsOrKeys.Type = &ppb.IdsOrKeys_Ids{Ids: &ppb.Ids{Vals: columnIDs}}
 	}
 
 	grpcClient := ppb.NewPilosaClient(c.grpcConn)
 
 	stream, err := grpcClient.Inspect(ctx, &ppb.InspectRequest{
 		Index:        index,
-		Columns:      columns,
-		FilterFields: filters,
+		Columns:      idsOrKeys,
+		FilterFields: fieldFilters,
 	})
 	if err != nil {
 		return nil, errors.Wrap(err, "getting stream")
